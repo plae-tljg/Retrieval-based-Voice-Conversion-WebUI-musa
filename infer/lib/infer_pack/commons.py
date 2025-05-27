@@ -10,7 +10,29 @@ from torch.nn import functional as F
 def init_weights(m, mean=0.0, std=0.01):
     classname = m.__class__.__name__
     if classname.find("Conv") != -1:
-        m.weight.data.normal_(mean, std)
+        # 检查是否有weight_v参数（weight_norm后的情况）
+        if hasattr(m, "weight_v"):
+            m.weight_v.data.normal_(mean, std)
+        # 检查是否有weight参数（普通情况）
+        elif hasattr(m, "weight"):
+            m.weight.data.normal_(mean, std)
+        # 如果都没有，可能是其他类型的层，跳过
+        else:
+            return
+    elif classname.find("Linear") != -1:
+        if hasattr(m, "weight_v"):
+            m.weight_v.data.normal_(mean, std)
+        elif hasattr(m, "weight"):
+            m.weight.data.normal_(mean, std)
+        else:
+            return
+    elif classname.find("Embedding") != -1:
+        if hasattr(m, "weight_v"):
+            m.weight_v.data.normal_(mean, std)
+        elif hasattr(m, "weight"):
+            m.weight.data.normal_(mean, std)
+        else:
+            return
 
 
 def get_padding(kernel_size, dilation=1):
@@ -164,9 +186,32 @@ def clip_grad_value_(parameters, clip_value, norm_type=2):
 
     total_norm = 0
     for p in parameters:
+        if p.grad is None:
+            continue
+            
+        # 检查梯度是否为 NaN
+        if torch.isnan(p.grad).any():
+            p.grad.data.zero_()
+            continue
+            
+        # 计算梯度范数
         param_norm = p.grad.data.norm(norm_type)
+        if torch.isnan(param_norm) or torch.isinf(param_norm):
+            p.grad.data.zero_()
+            continue
+            
         total_norm += param_norm.item() ** norm_type
+        
+        # 应用梯度裁剪
         if clip_value is not None:
             p.grad.data.clamp_(min=-clip_value, max=clip_value)
-    total_norm = total_norm ** (1.0 / norm_type)
+            
+    # 计算总范数
+    if len(parameters) > 0:
+        total_norm = total_norm ** (1.0 / norm_type)
+        if torch.isnan(torch.tensor(total_norm)) or torch.isinf(torch.tensor(total_norm)):
+            total_norm = 0.0
+    else:
+        total_norm = 0.0
+        
     return total_norm

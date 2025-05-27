@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import layers_537238KB as layers
+from .musa_ops import pad as musa_pad
 
 
 class BaseASPPNet(nn.Module):
@@ -59,10 +60,20 @@ class CascadedASPPNet(nn.Module):
         self.offset = 128
 
     def forward(self, x, aggressiveness=None):
+        # 验证输入数据
+        if not torch.all(torch.isfinite(x)):
+            print("Warning: Input tensor contains non-finite values, replacing with zeros")
+            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            
         mix = x.detach()
         x = x.clone()
 
         x = x[:, :, : self.max_bin]
+
+        # 验证裁剪后的数据
+        if not torch.all(torch.isfinite(x)):
+            print("Warning: Cropped tensor contains non-finite values, replacing with zeros")
+            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
         bandw = x.size()[2] // 2
         aux1 = torch.cat(
@@ -73,30 +84,56 @@ class CascadedASPPNet(nn.Module):
             dim=2,
         )
 
+        # 验证 aux1 数据
+        if not torch.all(torch.isfinite(aux1)):
+            print("Warning: aux1 tensor contains non-finite values, replacing with zeros")
+            aux1 = torch.nan_to_num(aux1, nan=0.0, posinf=0.0, neginf=0.0)
+
         h = torch.cat([x, aux1], dim=1)
         aux2 = self.stg2_full_band_net(self.stg2_bridge(h))
+
+        # 验证 aux2 数据
+        if not torch.all(torch.isfinite(aux2)):
+            print("Warning: aux2 tensor contains non-finite values, replacing with zeros")
+            aux2 = torch.nan_to_num(aux2, nan=0.0, posinf=0.0, neginf=0.0)
 
         h = torch.cat([x, aux1, aux2], dim=1)
         h = self.stg3_full_band_net(self.stg3_bridge(h))
 
+        # 验证最终特征数据
+        if not torch.all(torch.isfinite(h)):
+            print("Warning: Final feature tensor contains non-finite values, replacing with zeros")
+            h = torch.nan_to_num(h, nan=0.0, posinf=0.0, neginf=0.0)
+
         mask = torch.sigmoid(self.out(h))
-        mask = F.pad(
+        
+        # 验证 mask 数据
+        if not torch.all(torch.isfinite(mask)):
+            print("Warning: Mask tensor contains non-finite values, replacing with zeros")
+            mask = torch.nan_to_num(mask, nan=0.0, posinf=0.0, neginf=0.0)
+            
+        mask = musa_pad(
             input=mask,
-            pad=(0, 0, 0, self.output_bin - mask.size()[2]),
+            padding=(0, 0, 0, self.output_bin - mask.size()[2]),
             mode="replicate",
         )
+        
+        # 验证填充后的 mask 数据
+        if not torch.all(torch.isfinite(mask)):
+            print("Warning: Padded mask tensor contains non-finite values, replacing with zeros")
+            mask = torch.nan_to_num(mask, nan=0.0, posinf=0.0, neginf=0.0)
 
         if self.training:
             aux1 = torch.sigmoid(self.aux1_out(aux1))
-            aux1 = F.pad(
+            aux1 = musa_pad(
                 input=aux1,
-                pad=(0, 0, 0, self.output_bin - aux1.size()[2]),
+                padding=(0, 0, 0, self.output_bin - aux1.size()[2]),
                 mode="replicate",
             )
             aux2 = torch.sigmoid(self.aux2_out(aux2))
-            aux2 = F.pad(
+            aux2 = musa_pad(
                 input=aux2,
-                pad=(0, 0, 0, self.output_bin - aux2.size()[2]),
+                padding=(0, 0, 0, self.output_bin - aux2.size()[2]),
                 mode="replicate",
             )
             return mask * mix, aux1 * mix, aux2 * mix

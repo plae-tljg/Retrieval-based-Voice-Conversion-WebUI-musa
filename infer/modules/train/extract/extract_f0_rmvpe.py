@@ -10,6 +10,8 @@ import logging
 
 import numpy as np
 import pyworld
+import torch
+import torch_musa
 
 from infer.lib.audio import load_audio
 
@@ -49,8 +51,9 @@ class FeatureInput(object):
                 from infer.lib.rmvpe import RMVPE
 
                 print("Loading rmvpe model")
+                device = "cuda" if torch.cuda.is_available() else "musa:0" if hasattr(torch, "musa") and torch_musa.is_available() else "cpu"
                 self.model_rmvpe = RMVPE(
-                    "assets/rmvpe/rmvpe.pt", is_half=is_half, device="cuda"
+                    "assets/rmvpe/rmvpe.pt", is_half=is_half, device=device
                 )
             f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
         return f0

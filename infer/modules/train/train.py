@@ -17,6 +17,7 @@ n_gpus = len(hps.gpus.split("-"))
 from random import randint, shuffle
 
 import torch
+import torch_musa
 
 try:
     import intel_extension_for_pytorch as ipex  # pylint: disable=import-error, unused-import
@@ -94,8 +95,9 @@ class EpochRecorder:
 
 def main():
     n_gpus = torch.cuda.device_count()
-
-    if torch.cuda.is_available() == False and torch.backends.mps.is_available() == True:
+    if hasattr(torch, "musa") and torch_musa.is_available():
+        n_gpus = 1
+    elif torch.cuda.is_available() == False and torch.backends.mps.is_available() == True:
         n_gpus = 1
     if n_gpus < 1:
         # patch to unblock people without gpus. there is probably a better way.
@@ -146,8 +148,6 @@ def run(rank, n_gpus, hps, logger: logging.Logger):
         rank=rank,
         shuffle=True,
     )
-    # It is possible that dataloader's workers are out of shared memory. Please try to raise your shared memory limit.
-    # num_workers=8 -> num_workers=4
     if hps.if_f0 == 1:
         collate_fn = TextAudioCollateMultiNSFsid()
     else:
@@ -167,7 +167,7 @@ def run(rank, n_gpus, hps, logger: logging.Logger):
             hps.data.filter_length // 2 + 1,
             hps.train.segment_size // hps.data.hop_length,
             **hps.model,
-            is_half=hps.train.fp16_run,
+            is_half=False,
             sr=hps.sample_rate,
         )
     else:
@@ -175,13 +175,17 @@ def run(rank, n_gpus, hps, logger: logging.Logger):
             hps.data.filter_length // 2 + 1,
             hps.train.segment_size // hps.data.hop_length,
             **hps.model,
-            is_half=hps.train.fp16_run,
+            is_half=False,
         )
     if torch.cuda.is_available():
         net_g = net_g.cuda(rank)
+    elif hasattr(torch, "musa") and torch.musa.is_available():
+        net_g = net_g.to("musa:0")
     net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm)
     if torch.cuda.is_available():
         net_d = net_d.cuda(rank)
+    elif hasattr(torch, "musa") and torch.musa.is_available():
+        net_d = net_d.to("musa:0")
     optim_g = torch.optim.AdamW(
         net_g.parameters(),
         hps.train.learning_rate,
@@ -194,9 +198,8 @@ def run(rank, n_gpus, hps, logger: logging.Logger):
         betas=hps.train.betas,
         eps=hps.train.eps,
     )
-    # net_g = DDP(net_g, device_ids=[rank], find_unused_parameters=True)
-    # net_d = DDP(net_d, device_ids=[rank], find_unused_parameters=True)
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
+
+    if hasattr(torch, "musa") and torch.musa.is_available():
         pass
     elif torch.cuda.is_available():
         net_g = DDP(net_g, device_ids=[rank])
@@ -205,53 +208,89 @@ def run(rank, n_gpus, hps, logger: logging.Logger):
         net_g = DDP(net_g)
         net_d = DDP(net_d)
 
-    try:  # 如果能加载自动resume
+    try:
         _, _, _, epoch_str = utils.load_checkpoint(
             utils.latest_checkpoint_path(hps.model_dir, "D_*.pth"), net_d, optim_d
-        )  # D多半加载没事
+        )
         if rank == 0:
             logger.info("loaded D")
-        # _, _, _, epoch_str = utils.load_checkpoint(utils.latest_checkpoint_path(hps.model_dir, "G_*.pth"), net_g, optim_g,load_opt=0)
         _, _, _, epoch_str = utils.load_checkpoint(
             utils.latest_checkpoint_path(hps.model_dir, "G_*.pth"), net_g, optim_g
         )
         global_step = (epoch_str - 1) * len(train_loader)
-        # epoch_str = 1
-        # global_step = 0
-    except:  # 如果首次不能加载，加载pretrain
-        # traceback.print_exc()
+    except:
         epoch_str = 1
         global_step = 0
         if hps.pretrainG != "":
             if rank == 0:
                 logger.info("loaded pretrained %s" % (hps.pretrainG))
             if hasattr(net_g, "module"):
-                logger.info(
-                    net_g.module.load_state_dict(
-                        torch.load(hps.pretrainG, map_location="cpu")["model"]
-                    )
-                )  ##测试不加载优化器
+                # 处理预训练模型的权重参数名称
+                pretrained_dict = torch.load(hps.pretrainG, map_location="cpu")["model"]
+                model_dict = net_g.module.state_dict()
+                # 创建新的权重字典，处理参数名称不匹配的问题
+                new_pretrained_dict = {}
+                for k, v in pretrained_dict.items():
+                    if k in model_dict:
+                        new_pretrained_dict[k] = v
+                    elif k.replace("module.", "") in model_dict:
+                        new_pretrained_dict[k.replace("module.", "")] = v
+                    elif "module." + k in model_dict:
+                        new_pretrained_dict["module." + k] = v
+                # 更新模型权重
+                model_dict.update(new_pretrained_dict)
+                net_g.module.load_state_dict(model_dict)
             else:
-                logger.info(
-                    net_g.load_state_dict(
-                        torch.load(hps.pretrainG, map_location="cpu")["model"]
-                    )
-                )  ##测试不加载优化器
+                # 处理预训练模型的权重参数名称
+                pretrained_dict = torch.load(hps.pretrainG, map_location="cpu")["model"]
+                model_dict = net_g.state_dict()
+                # 创建新的权重字典，处理参数名称不匹配的问题
+                new_pretrained_dict = {}
+                for k, v in pretrained_dict.items():
+                    if k in model_dict:
+                        new_pretrained_dict[k] = v
+                    elif k.replace("module.", "") in model_dict:
+                        new_pretrained_dict[k.replace("module.", "")] = v
+                    elif "module." + k in model_dict:
+                        new_pretrained_dict["module." + k] = v
+                # 更新模型权重
+                model_dict.update(new_pretrained_dict)
+                net_g.load_state_dict(model_dict)
         if hps.pretrainD != "":
             if rank == 0:
                 logger.info("loaded pretrained %s" % (hps.pretrainD))
             if hasattr(net_d, "module"):
-                logger.info(
-                    net_d.module.load_state_dict(
-                        torch.load(hps.pretrainD, map_location="cpu")["model"]
-                    )
-                )
+                # 处理预训练模型的权重参数名称
+                pretrained_dict = torch.load(hps.pretrainD, map_location="cpu")["model"]
+                model_dict = net_d.module.state_dict()
+                # 创建新的权重字典，处理参数名称不匹配的问题
+                new_pretrained_dict = {}
+                for k, v in pretrained_dict.items():
+                    if k in model_dict:
+                        new_pretrained_dict[k] = v
+                    elif k.replace("module.", "") in model_dict:
+                        new_pretrained_dict[k.replace("module.", "")] = v
+                    elif "module." + k in model_dict:
+                        new_pretrained_dict["module." + k] = v
+                # 更新模型权重
+                model_dict.update(new_pretrained_dict)
+                net_d.module.load_state_dict(model_dict)
             else:
-                logger.info(
-                    net_d.load_state_dict(
-                        torch.load(hps.pretrainD, map_location="cpu")["model"]
-                    )
-                )
+                # 处理预训练模型的权重参数名称
+                pretrained_dict = torch.load(hps.pretrainD, map_location="cpu")["model"]
+                model_dict = net_d.state_dict()
+                # 创建新的权重字典，处理参数名称不匹配的问题
+                new_pretrained_dict = {}
+                for k, v in pretrained_dict.items():
+                    if k in model_dict:
+                        new_pretrained_dict[k] = v
+                    elif k.replace("module.", "") in model_dict:
+                        new_pretrained_dict[k.replace("module.", "")] = v
+                    elif "module." + k in model_dict:
+                        new_pretrained_dict["module." + k] = v
+                # 更新模型权重
+                model_dict.update(new_pretrained_dict)
+                net_d.load_state_dict(model_dict)
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g, gamma=hps.train.lr_decay, last_epoch=epoch_str - 2
@@ -301,9 +340,16 @@ def train_and_evaluate(
 ):
     net_g, net_d = nets
     optim_g, optim_d = optims
+    scheduler_g, scheduler_d = schedulers
     train_loader, eval_loader = loaders
-    if writers is not None:
-        writer, writer_eval = writers
+    writer, writer_eval = writers
+
+    # 添加数值稳定性检查和处理
+    def handle_nan(tensor, name):
+        if torch.isnan(tensor).any():
+            logger.warning(f"NaN detected in {name}, replacing with 0")
+            tensor = torch.where(torch.isnan(tensor), torch.zeros_like(tensor), tensor)
+        return tensor
 
     train_loader.batch_sampler.set_epoch(epoch)
     global global_step
@@ -353,6 +399,18 @@ def train_and_evaluate(
                     spec_lengths = spec_lengths.cuda(rank, non_blocking=True)
                     wave = wave.cuda(rank, non_blocking=True)
                     wave_lengths = wave_lengths.cuda(rank, non_blocking=True)
+                elif hasattr(torch, "musa") and torch.musa.is_available():
+                    device = torch.device("musa:0")
+                    phone = phone.to(device, non_blocking=True)
+                    phone_lengths = phone_lengths.to(device, non_blocking=True)
+                    if hps.if_f0 == 1:
+                        pitch = pitch.to(device, non_blocking=True)
+                        pitchf = pitchf.to(device, non_blocking=True)
+                    sid = sid.to(device, non_blocking=True)
+                    spec = spec.to(device, non_blocking=True)
+                    spec_lengths = spec_lengths.to(device, non_blocking=True)
+                    wave = wave.to(device, non_blocking=True)
+                    wave_lengths = wave_lengths.to(device, non_blocking=True)
                 # Cache on list
                 if hps.if_f0 == 1:
                     cache.append(
@@ -396,6 +454,11 @@ def train_and_evaluate(
     # Run steps
     epoch_recorder = EpochRecorder()
     for batch_idx, info in data_iterator:
+        if hasattr(torch, "musa") and torch.musa.is_available():
+            info = tuple(x.to("musa:0") for x in info)
+        else:
+            info = tuple(x.cuda(rank, non_blocking=True) for x in info)
+
         # Data
         ## Unpack
         if hps.if_f0 == 1:
@@ -423,10 +486,30 @@ def train_and_evaluate(
             spec = spec.cuda(rank, non_blocking=True)
             spec_lengths = spec_lengths.cuda(rank, non_blocking=True)
             wave = wave.cuda(rank, non_blocking=True)
-            # wave_lengths = wave_lengths.cuda(rank, non_blocking=True)
+            wave_lengths = wave_lengths.cuda(rank, non_blocking=True)
+        elif hasattr(torch, "musa") and torch_musa.is_available():
+            device = torch.device("musa:0")
+            phone = phone.to(device, non_blocking=True)
+            phone_lengths = phone_lengths.to(device, non_blocking=True)
+            if hps.if_f0 == 1:
+                pitch = pitch.to(device, non_blocking=True)
+                pitchf = pitchf.to(device, non_blocking=True)
+            sid = sid.to(device, non_blocking=True)
+            spec = spec.to(device, non_blocking=True)
+            spec_lengths = spec_lengths.to(device, non_blocking=True)
+            wave = wave.to(device, non_blocking=True)
+            wave_lengths = wave_lengths.to(device, non_blocking=True)
+
+        # 处理输入数据中的 NaN
+        phone = handle_nan(phone, "phone")
+        spec = handle_nan(spec, "spec")
+        wave = handle_nan(wave, "wave")
+        if hps.if_f0 == 1:
+            pitch = handle_nan(pitch, "pitch")
+            pitchf = handle_nan(pitchf, "pitchf")
 
         # Calculate
-        with autocast(enabled=hps.train.fp16_run):
+        with autocast(enabled=False):
             if hps.if_f0 == 1:
                 (
                     y_hat,
@@ -466,7 +549,7 @@ def train_and_evaluate(
                     hps.data.mel_fmax,
                 )
             if hps.train.fp16_run == True:
-                y_hat_mel = y_hat_mel.half()
+                y_hat_mel = y_hat_mel.float()
             wave = commons.slice_segments(
                 wave, ids_slice * hps.data.hop_length, hps.train.segment_size
             )  # slice
@@ -492,6 +575,12 @@ def train_and_evaluate(
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
                 loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
+
+        # 在反向传播前处理损失值中的 NaN
+        loss_gen_all = handle_nan(loss_gen_all, "loss_gen_all")
+        loss_disc = handle_nan(loss_disc, "loss_disc")
+
+        # 生成器反向传播
         optim_g.zero_grad()
         scaler.scale(loss_gen_all).backward()
         scaler.unscale_(optim_g)
@@ -521,8 +610,6 @@ def train_and_evaluate(
                     "loss/g/total": loss_gen_all,
                     "loss/d/total": loss_disc,
                     "learning_rate": lr,
-                    "grad_norm_d": grad_norm_d,
-                    "grad_norm_g": grad_norm_g,
                 }
                 scalar_dict.update(
                     {

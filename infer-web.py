@@ -17,6 +17,7 @@ from i18n.i18n import I18nAuto
 from configs.config import Config
 from sklearn.cluster import MiniBatchKMeans
 import torch, platform
+import torch_musa
 import numpy as np
 import gradio as gr
 import faiss
@@ -111,6 +112,20 @@ if torch.cuda.is_available() or ngpu != 0:
                     + 0.4
                 )
             )
+elif hasattr(torch, "musa") and torch_musa.is_available():
+    if_gpu_ok = True
+    gpu_name = "MUSA GPU"
+    gpu_infos.append("0\t%s" % gpu_name)
+    mem.append(
+        int(
+            torch_musa.get_device_properties(0).total_memory
+            / 1024
+            / 1024
+            / 1024
+            + 0.4
+        )
+    )
+
 if if_gpu_ok and len(gpu_infos) > 0:
     gpu_info = "\n".join(gpu_infos)
     default_batch_size = min(mem) // 2

@@ -6,6 +6,7 @@ import shutil
 from multiprocessing import cpu_count
 
 import torch
+import torch_musa
 
 try:
     import intel_extension_for_pytorch as ipex  # pylint: disable=import-error, unused-import
@@ -165,13 +166,27 @@ class Config:
             )
             if self.gpu_mem <= 4:
                 self.preprocess_per = 3.0
+        elif hasattr(torch, "musa") and torch_musa.is_available():
+            logger.info("Found MUSA GPU")
+            self.device = self.instead = "musa:0"
+            self.is_half = False
+            self.use_fp32_config()
+            self.gpu_mem = int(
+                torch_musa.get_device_properties(0).total_memory
+                / 1024
+                / 1024
+                / 1024
+                + 0.4
+            )
+            if self.gpu_mem <= 4:
+                self.preprocess_per = 3.0
         elif self.has_mps():
-            logger.info("No supported Nvidia GPU found")
+            logger.info("No supported GPU found")
             self.device = self.instead = "mps"
             self.is_half = False
             self.use_fp32_config()
         else:
-            logger.info("No supported Nvidia GPU found")
+            logger.info("No supported GPU found")
             self.device = self.instead = "cpu"
             self.is_half = False
             self.use_fp32_config()

@@ -198,6 +198,7 @@ class Pipeline(object):
         version,
         protect,
     ):  # ,file_index,file_big_npy
+        logger.info(f"[VC] Received protect value: {protect}, type: {type(protect)}")
         feats = torch.from_numpy(audio0)
         if self.is_half:
             feats = feats.half()
@@ -219,6 +220,7 @@ class Pipeline(object):
             logits = model.extract_features(**inputs)
             feats = model.final_proj(logits[0]) if version == "v1" else logits[0]
         if protect < 0.5 and pitch is not None and pitchf is not None:
+            logger.info(f"[VC] protect < 0.5 condition met: protect={protect}, pitch={pitch is not None}, pitchf={pitchf is not None}")
             feats0 = feats.clone()
         if (
             not isinstance(index, type(None))
@@ -228,10 +230,10 @@ class Pipeline(object):
             npy = feats[0].cpu().numpy()
             if self.is_half:
                 npy = npy.astype("float32")
-
-            # _, I = index.search(npy, 1)
-            # npy = big_npy[I.squeeze()]
-
+            
+            logger.info(f"[VC] Index dimension: {index.d}, Input vector dimension: {npy.shape[1]}")
+            logger.info(f"[VC] Model version: {version}, Index shape: {npy.shape}, big_npy shape: {big_npy.shape}")
+            
             score, ix = index.search(npy, k=8)
             weight = np.square(1 / score)
             weight /= weight.sum(axis=1, keepdims=True)
@@ -299,6 +301,13 @@ class Pipeline(object):
         protect,
         f0_file=None,
     ):
+        logger.info(f"[Pipeline] Received protect value: {protect}, type: {type(protect)}")
+        if protect is None:
+            protect = 0.33
+            logger.info("[Pipeline] protect was None, set to default: 0.33")
+        protect = float(protect)
+        logger.info(f"[Pipeline] After conversion protect value: {protect}, type: {type(protect)}")
+        
         if (
             file_index != ""
             # and file_big_npy != ""
@@ -442,10 +451,45 @@ class Pipeline(object):
         audio_opt = np.concatenate(audio_opt)
         if rms_mix_rate != 1:
             audio_opt = change_rms(audio, 16000, audio_opt, tgt_sr, rms_mix_rate)
+            
+        # 在重采样之前验证音频数据
+        if not np.all(np.isfinite(audio_opt)):
+            logger.warning("Audio contains non-finite values before resampling, cleaning...")
+            audio_opt = np.nan_to_num(audio_opt, nan=0.0, posinf=0.0, neginf=0.0)
+            if not np.all(np.isfinite(audio_opt)):
+                logger.error("Failed to clean audio before resampling")
+                raise ValueError("Audio data contains invalid values that cannot be cleaned")
+                
+        # 确保音频数据在合理范围内
+        audio_max = np.abs(audio_opt).max()
+        if audio_max > 1:
+            logger.info(f"Normalizing audio before resampling, max amplitude: {audio_max}")
+            audio_opt = audio_opt / audio_max
+            
         if tgt_sr != resample_sr >= 16000:
-            audio_opt = librosa.resample(
-                audio_opt, orig_sr=tgt_sr, target_sr=resample_sr
-            )
+            try:
+                logger.info(f"Resampling from {tgt_sr} to {resample_sr}")
+                # 使用更安全的 resample 方法
+                audio_opt = librosa.resample(
+                    audio_opt.astype(np.float32),  # 确保输入是 float32
+                    orig_sr=tgt_sr,
+                    target_sr=resample_sr,
+                    res_type='kaiser_best'  # 使用更高质量的重采样方法
+                )
+                
+                # 验证重采样后的数据
+                if not np.all(np.isfinite(audio_opt)):
+                    logger.warning("Audio contains non-finite values after resampling, cleaning...")
+                    audio_opt = np.nan_to_num(audio_opt, nan=0.0, posinf=0.0, neginf=0.0)
+                    if not np.all(np.isfinite(audio_opt)):
+                        logger.error("Failed to clean audio after resampling")
+                        raise ValueError("Audio data contains invalid values after resampling")
+                        
+            except Exception as e:
+                logger.error(f"Error during resampling: {str(e)}")
+                raise RuntimeError(f"Resampling failed: {str(e)}")
+                
+        # 最终的音频处理
         audio_max = np.abs(audio_opt).max() / 0.99
         max_int16 = 32768
         if audio_max > 1:
