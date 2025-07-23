@@ -3,8 +3,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from . import layers_new
-from . import spec_utils
-from .musa_ops import pad as musa_pad
 
 
 class BaseNet(nn.Module):
@@ -97,18 +95,18 @@ class CascadedNet(nn.Module):
         f3 = self.stg3_full_band_net(f3_in)
 
         mask = torch.sigmoid(self.out(f3))
-        mask = musa_pad(
+        mask = F.pad(
             input=mask,
-            padding=(0, 0, 0, self.output_bin - mask.size()[2]),
+            pad=(0, 0, 0, self.output_bin - mask.size()[2]),
             mode="replicate",
         )
 
         if self.training:
             aux = torch.cat([aux1, aux2], dim=1)
             aux = torch.sigmoid(self.aux_out(aux))
-            aux = musa_pad(
+            aux = F.pad(
                 input=aux,
-                padding=(0, 0, 0, self.output_bin - aux.size()[2]),
+                pad=(0, 0, 0, self.output_bin - aux.size()[2]),
                 mode="replicate",
             )
             return mask, aux

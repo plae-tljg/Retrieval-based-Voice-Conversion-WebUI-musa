@@ -17,6 +17,9 @@ import torch
 import torch.nn.functional as F
 import torchcrepe
 from scipy import signal
+import torch_musa
+import soundfile as sf
+import tempfile
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -198,7 +201,6 @@ class Pipeline(object):
         version,
         protect,
     ):  # ,file_index,file_big_npy
-        logger.info(f"[VC] Received protect value: {protect}, type: {type(protect)}")
         feats = torch.from_numpy(audio0)
         if self.is_half:
             feats = feats.half()
@@ -217,10 +219,20 @@ class Pipeline(object):
         }
         t0 = ttime()
         with torch.no_grad():
-            logits = model.extract_features(**inputs)
-            feats = model.final_proj(logits[0]) if version == "v1" else logits[0]
+            # workaround: 在CPU上跑extract_features，避免MuDNN SDPA报错
+            model_device = next(model.parameters()).device
+            feats_cpu = inputs["source"].to("cpu")
+            padding_mask_cpu = inputs["padding_mask"].to("cpu")
+            model_cpu = model.to("cpu")
+            cpu_inputs = {"source": feats_cpu, "padding_mask": padding_mask_cpu, "output_layer": inputs["output_layer"]}
+            logits = model_cpu.extract_features(**cpu_inputs)
+            # 结果转回musa
+            if version == "v1":
+                feats = model_cpu.final_proj(logits[0]).to(self.device)
+            else:
+                feats = logits[0].to(self.device)
+            model.to(self.device)
         if protect < 0.5 and pitch is not None and pitchf is not None:
-            logger.info(f"[VC] protect < 0.5 condition met: protect={protect}, pitch={pitch is not None}, pitchf={pitchf is not None}")
             feats0 = feats.clone()
         if (
             not isinstance(index, type(None))
@@ -230,10 +242,10 @@ class Pipeline(object):
             npy = feats[0].cpu().numpy()
             if self.is_half:
                 npy = npy.astype("float32")
-            
-            logger.info(f"[VC] Index dimension: {index.d}, Input vector dimension: {npy.shape[1]}")
-            logger.info(f"[VC] Model version: {version}, Index shape: {npy.shape}, big_npy shape: {big_npy.shape}")
-            
+
+            # _, I = index.search(npy, 1)
+            # npy = big_npy[I.squeeze()]
+
             score, ix = index.search(npy, k=8)
             weight = np.square(1 / score)
             weight /= weight.sum(axis=1, keepdims=True)
@@ -301,13 +313,6 @@ class Pipeline(object):
         protect,
         f0_file=None,
     ):
-        logger.info(f"[Pipeline] Received protect value: {protect}, type: {type(protect)}")
-        if protect is None:
-            protect = 0.33
-            logger.info("[Pipeline] protect was None, set to default: 0.33")
-        protect = float(protect)
-        logger.info(f"[Pipeline] After conversion protect value: {protect}, type: {type(protect)}")
-        
         if (
             file_index != ""
             # and file_big_npy != ""
@@ -451,45 +456,10 @@ class Pipeline(object):
         audio_opt = np.concatenate(audio_opt)
         if rms_mix_rate != 1:
             audio_opt = change_rms(audio, 16000, audio_opt, tgt_sr, rms_mix_rate)
-            
-        # 在重采样之前验证音频数据
-        if not np.all(np.isfinite(audio_opt)):
-            logger.warning("Audio contains non-finite values before resampling, cleaning...")
-            audio_opt = np.nan_to_num(audio_opt, nan=0.0, posinf=0.0, neginf=0.0)
-            if not np.all(np.isfinite(audio_opt)):
-                logger.error("Failed to clean audio before resampling")
-                raise ValueError("Audio data contains invalid values that cannot be cleaned")
-                
-        # 确保音频数据在合理范围内
-        audio_max = np.abs(audio_opt).max()
-        if audio_max > 1:
-            logger.info(f"Normalizing audio before resampling, max amplitude: {audio_max}")
-            audio_opt = audio_opt / audio_max
-            
         if tgt_sr != resample_sr >= 16000:
-            try:
-                logger.info(f"Resampling from {tgt_sr} to {resample_sr}")
-                # 使用更安全的 resample 方法
-                audio_opt = librosa.resample(
-                    audio_opt.astype(np.float32),  # 确保输入是 float32
-                    orig_sr=tgt_sr,
-                    target_sr=resample_sr,
-                    res_type='kaiser_best'  # 使用更高质量的重采样方法
-                )
-                
-                # 验证重采样后的数据
-                if not np.all(np.isfinite(audio_opt)):
-                    logger.warning("Audio contains non-finite values after resampling, cleaning...")
-                    audio_opt = np.nan_to_num(audio_opt, nan=0.0, posinf=0.0, neginf=0.0)
-                    if not np.all(np.isfinite(audio_opt)):
-                        logger.error("Failed to clean audio after resampling")
-                        raise ValueError("Audio data contains invalid values after resampling")
-                        
-            except Exception as e:
-                logger.error(f"Error during resampling: {str(e)}")
-                raise RuntimeError(f"Resampling failed: {str(e)}")
-                
-        # 最终的音频处理
+            audio_opt = librosa.resample(
+                audio_opt, orig_sr=tgt_sr, target_sr=resample_sr
+            )
         audio_max = np.abs(audio_opt).max() / 0.99
         max_int16 = 32768
         if audio_max > 1:
@@ -498,4 +468,11 @@ class Pipeline(object):
         del pitch, pitchf, sid
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if torch_musa.is_available():
+            torch_musa.empty_cache()
         return audio_opt
+        # 推理主流程最后，保存音频为临时wav文件并返回文件路径
+        tmp_wav = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+        sf.write(tmp_wav.name, audio_opt, samplerate=resample_sr or tgt_sr)
+        tmp_wav.close()
+        return tmp_wav.name

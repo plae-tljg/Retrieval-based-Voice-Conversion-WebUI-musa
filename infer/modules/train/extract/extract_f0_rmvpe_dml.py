@@ -8,6 +8,8 @@ now_dir = os.getcwd()
 sys.path.append(now_dir)
 import logging
 
+import torch
+import torch_musa
 import numpy as np
 import pyworld
 
@@ -16,9 +18,8 @@ from infer.lib.audio import load_audio
 logging.getLogger("numba").setLevel(logging.WARNING)
 
 exp_dir = sys.argv[1]
-import torch_directml
 
-device = torch_directml.device(torch_directml.default_device())
+device = "musa:0"
 f = open("%s/extract_f0_feature.log" % exp_dir, "a+")
 
 
@@ -38,6 +39,7 @@ class FeatureInput(object):
         self.f0_min = 50.0
         self.f0_mel_min = 1127 * np.log(1 + self.f0_min / 700)
         self.f0_mel_max = 1127 * np.log(1 + self.f0_max / 700)
+        self.device = device
 
     def compute_f0(self, path, f0_method):
         x = load_audio(path, self.fs)
@@ -48,7 +50,7 @@ class FeatureInput(object):
 
                 print("Loading rmvpe model")
                 self.model_rmvpe = RMVPE(
-                    "assets/rmvpe/rmvpe.pt", is_half=False, device=device
+                    "assets/rmvpe/rmvpe.pt", is_half=False, device=self.device
                 )
             f0 = self.model_rmvpe.infer_from_audio(x, thred=0.03)
         return f0

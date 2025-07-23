@@ -1,0 +1,5 @@
+conda env list
+
+conda activate test_rvc_env
+
+python infer-web.py

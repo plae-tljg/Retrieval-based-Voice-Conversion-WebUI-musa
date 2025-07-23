@@ -30,14 +30,6 @@ def crop_center(h1, h2):
 def wave_to_spectrogram(
     wave, hop_length, n_fft, mid_side=False, mid_side_b2=False, reverse=False
 ):
-    # 验证输入数据
-    if not np.all(np.isfinite(wave)):
-        # 将非有限值替换为0
-        wave = np.nan_to_num(wave, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # 确保数据在合理范围内
-    wave = np.clip(wave, -1.0, 1.0)
-    
     if reverse:
         wave_left = np.flip(np.asfortranarray(wave[0]))
         wave_right = np.flip(np.asfortranarray(wave[1]))
@@ -51,18 +43,8 @@ def wave_to_spectrogram(
         wave_left = np.asfortranarray(wave[0])
         wave_right = np.asfortranarray(wave[1])
 
-    # 验证处理后的数据
-    if not np.all(np.isfinite(wave_left)) or not np.all(np.isfinite(wave_right)):
-        wave_left = np.nan_to_num(wave_left, nan=0.0, posinf=0.0, neginf=0.0)
-        wave_right = np.nan_to_num(wave_right, nan=0.0, posinf=0.0, neginf=0.0)
-
     spec_left = librosa.stft(wave_left, n_fft=n_fft, hop_length=hop_length)
     spec_right = librosa.stft(wave_right, n_fft=n_fft, hop_length=hop_length)
-
-    # 验证频谱数据
-    if not np.all(np.isfinite(spec_left)) or not np.all(np.isfinite(spec_right)):
-        spec_left = np.nan_to_num(spec_left, nan=0.0, posinf=0.0, neginf=0.0)
-        spec_right = np.nan_to_num(spec_right, nan=0.0, posinf=0.0, neginf=0.0)
 
     spec = np.asfortranarray([spec_left, spec_right])
 
@@ -238,53 +220,29 @@ def cache_or_load(mix_path, inst_path, mp):
     inst_cache_path = os.path.join(inst_cache_dir, inst_basename + ".npy")
 
     if os.path.exists(mix_cache_path) and os.path.exists(inst_cache_path):
-        try:
-            X_spec_m = np.load(mix_cache_path)
-            y_spec_m = np.load(inst_cache_path)
-            
-            # 验证缓存数据
-            if not np.all(np.isfinite(X_spec_m)) or not np.all(np.isfinite(y_spec_m)):
-                raise ValueError("Cached data contains invalid values")
-                
-        except (ValueError, np.lib.npyio.NpzFileError):
-            # 如果缓存数据无效，重新生成
-            os.remove(mix_cache_path)
-            os.remove(inst_cache_path)
-            X_spec_m, y_spec_m = None, None
+        X_spec_m = np.load(mix_cache_path)
+        y_spec_m = np.load(inst_cache_path)
     else:
-        X_spec_m, y_spec_m = None, None
-
-    if X_spec_m is None or y_spec_m is None:
         X_wave, y_wave, X_spec_s, y_spec_s = {}, {}, {}, {}
 
         for d in range(len(mp.param["band"]), 0, -1):
             bp = mp.param["band"][d]
 
             if d == len(mp.param["band"]):  # high-end band
-                try:
-                    X_wave[d], _ = librosa.load(
-                        mix_path,
-                        sr=bp["sr"],
-                        mono=False,
-                        dtype=np.float32,
-                        res_type=bp["res_type"]
-                    )
-                    y_wave[d], _ = librosa.load(
-                        inst_path,
-                        sr=bp["sr"],
-                        mono=False,
-                        dtype=np.float32,
-                        res_type=bp["res_type"],
-                    )
-                    
-                    # 验证加载的音频数据
-                    if not np.all(np.isfinite(X_wave[d])) or not np.all(np.isfinite(y_wave[d])):
-                        X_wave[d] = np.nan_to_num(X_wave[d], nan=0.0, posinf=0.0, neginf=0.0)
-                        y_wave[d] = np.nan_to_num(y_wave[d], nan=0.0, posinf=0.0, neginf=0.0)
-                        
-                except Exception as e:
-                    print(f"Error loading audio file: {e}")
-                    raise
+                X_wave[d], _ = librosa.load(
+                    mix_path,
+                    sr=bp["sr"],
+                    mono=False,
+                    dtype=np.float32,
+                    res_type=bp["res_type"]
+                )
+                y_wave[d], _ = librosa.load(
+                    inst_path,
+                    sr=bp["sr"],
+                    mono=False,
+                    dtype=np.float32,
+                    res_type=bp["res_type"],
+                )
             else:  # lower bands
                 X_wave[d] = librosa.resample(
                     X_wave[d + 1],
@@ -326,10 +284,7 @@ def cache_or_load(mix_path, inst_path, mp):
         if X_spec_m.shape != y_spec_m.shape:
             raise ValueError("The combined spectrograms are different: " + mix_path)
 
-        # 验证最终数据
-        if not np.all(np.isfinite(X_spec_m)) or not np.all(np.isfinite(y_spec_m)):
-            X_spec_m = np.nan_to_num(X_spec_m, nan=0.0, posinf=0.0, neginf=0.0)
-            y_spec_m = np.nan_to_num(y_spec_m, nan=0.0, posinf=0.0, neginf=0.0)
+        _, ext = os.path.splitext(mix_path)
 
         np.save(mix_cache_path, X_spec_m)
         np.save(inst_cache_path, y_spec_m)

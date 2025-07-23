@@ -44,8 +44,8 @@ def singleton_variable(func):
 @singleton_variable
 class Config:
     def __init__(self):
-        self.device = "cuda:0"
-        self.is_half = True
+        self.device = "musa:0"
+        self.is_half = False
         self.use_jit = False
         self.n_cpu = 0
         self.gpu_name = None
@@ -138,7 +138,12 @@ class Config:
         logger.info("overwrite preprocess_per to %d" % (self.preprocess_per))
 
     def device_config(self) -> tuple:
-        if torch.cuda.is_available():
+        import torch_musa
+        if torch_musa.is_available():
+            self.device = "musa:0"
+            self.is_half = False
+            self.use_fp32_config()
+        elif torch.cuda.is_available():
             if self.has_xpu():
                 self.device = self.instead = "xpu:0"
                 self.is_half = True
@@ -166,27 +171,13 @@ class Config:
             )
             if self.gpu_mem <= 4:
                 self.preprocess_per = 3.0
-        elif hasattr(torch, "musa") and torch_musa.is_available():
-            logger.info("Found MUSA GPU")
-            self.device = self.instead = "musa:0"
-            self.is_half = False
-            self.use_fp32_config()
-            self.gpu_mem = int(
-                torch_musa.get_device_properties(0).total_memory
-                / 1024
-                / 1024
-                / 1024
-                + 0.4
-            )
-            if self.gpu_mem <= 4:
-                self.preprocess_per = 3.0
         elif self.has_mps():
-            logger.info("No supported GPU found")
+            logger.info("No supported Nvidia GPU found")
             self.device = self.instead = "mps"
             self.is_half = False
             self.use_fp32_config()
         else:
-            logger.info("No supported GPU found")
+            logger.info("No supported Nvidia GPU found")
             self.device = self.instead = "cpu"
             self.is_half = False
             self.use_fp32_config()
@@ -235,9 +226,9 @@ class Config:
                 except:
                     pass
             # if self.device != "cpu":
-            import torch_directml
+            import torch_musa
 
-            self.device = torch_directml.device(torch_directml.default_device())
+            self.device = "musa:0"
             self.is_half = False
         else:
             if self.instead:

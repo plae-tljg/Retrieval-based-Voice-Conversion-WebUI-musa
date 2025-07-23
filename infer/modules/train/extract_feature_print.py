@@ -31,9 +31,9 @@ if "privateuseone" not in device:
     elif torch.backends.mps.is_available():
         device = "mps"
 else:
-    import torch_directml
+    import torch_musa
 
-    device = torch_directml.device(torch_directml.default_device())
+    device = "musa:0"
 
     def forward_dml(ctx, x, scale):
         ctx.scale = scale

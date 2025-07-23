@@ -16,8 +16,9 @@ from infer.lib.train.process_ckpt import (
 from i18n.i18n import I18nAuto
 from configs.config import Config
 from sklearn.cluster import MiniBatchKMeans
-import torch, platform
+import torch
 import torch_musa
+import platform
 import numpy as np
 import gradio as gr
 import faiss
@@ -32,6 +33,8 @@ import traceback
 import threading
 import shutil
 import logging
+import soundfile as sf
+import tempfile
 
 
 logging.getLogger("numba").setLevel(logging.WARNING)
@@ -52,6 +55,8 @@ torch.manual_seed(114514)
 
 
 config = Config()
+# config.is_half 相关全部禁用
+config.is_half = False
 vc = VC(config)
 
 
@@ -66,14 +71,16 @@ if config.dml == True:
 i18n = I18nAuto()
 logger.info(i18n)
 # 判断是否有能用来训练和加速推理的N卡
-ngpu = torch.cuda.device_count()
+ngpu = torch_musa.device_count()
 gpu_infos = []
 mem = []
 if_gpu_ok = False
 
-if torch.cuda.is_available() or ngpu != 0:
+# if torch.cuda.is_available() or ngpu != 0:
+if torch_musa.is_available() or ngpu != 0:
     for i in range(ngpu):
-        gpu_name = torch.cuda.get_device_name(i)
+        # gpu_name = torch.cuda.get_device_name(i)
+        gpu_name = torch_musa.get_device_name(i)
         if any(
             value in gpu_name.upper()
             for value in [
@@ -100,39 +107,25 @@ if torch.cuda.is_available() or ngpu != 0:
                 "6000",
             ]
         ):
-            # A10#A100#V100#A40#P40#M40#K80#A4500
-            if_gpu_ok = True  # 至少有一张能用的N卡
+            if_gpu_ok = True
             gpu_infos.append("%s\t%s" % (i, gpu_name))
             mem.append(
                 int(
-                    torch.cuda.get_device_properties(i).total_memory
+                    # torch.cuda.get_device_properties(i).total_memory
+                    torch_musa.get_device_properties(i).total_memory
                     / 1024
                     / 1024
                     / 1024
                     + 0.4
                 )
             )
-elif hasattr(torch, "musa") and torch_musa.is_available():
-    if_gpu_ok = True
-    gpu_name = "MUSA GPU"
-    gpu_infos.append("0\t%s" % gpu_name)
-    mem.append(
-        int(
-            torch_musa.get_device_properties(0).total_memory
-            / 1024
-            / 1024
-            / 1024
-            + 0.4
-        )
-    )
-
 if if_gpu_ok and len(gpu_infos) > 0:
     gpu_info = "\n".join(gpu_infos)
     default_batch_size = min(mem) // 2
 else:
     gpu_info = i18n("很遗憾您这没有能用的显卡来支持您训练")
     default_batch_size = 1
-gpus = "-".join([i[0] for i in gpu_infos])
+gpus = "0"  # 只保留单卡
 
 
 class ToolButton(gr.Button, gr.components.FormComponent):
@@ -271,7 +264,7 @@ def preprocess_dataset(trainset_dir, exp_dir, sr, n_p):
 
 # but2.click(extract_f0,[gpus6,np7,f0method8,if_f0_3,trainset_dir4],[info2])
 def extract_f0_feature(gpus, n_p, f0method, if_f0, exp_dir, version19, gpus_rmvpe):
-    gpus = gpus.split("-")
+    gpus = ["0"]  # 只保留单卡
     os.makedirs("%s/logs/%s" % (now_dir, exp_dir), exist_ok=True)
     f = open("%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "w")
     f.close()
@@ -301,52 +294,21 @@ def extract_f0_feature(gpus, n_p, f0method, if_f0, exp_dir, version19, gpus_rmvp
                 ),
             ).start()
         else:
-            if gpus_rmvpe != "-":
-                gpus_rmvpe = gpus_rmvpe.split("-")
-                leng = len(gpus_rmvpe)
-                ps = []
-                for idx, n_g in enumerate(gpus_rmvpe):
-                    cmd = (
-                        '"%s" infer/modules/train/extract/extract_f0_rmvpe.py %s %s %s "%s/logs/%s" %s '
-                        % (
-                            config.python_cmd,
-                            leng,
-                            idx,
-                            n_g,
-                            now_dir,
-                            exp_dir,
-                            config.is_half,
-                        )
-                    )
-                    logger.info("Execute: " + cmd)
-                    p = Popen(
-                        cmd, shell=True, cwd=now_dir
-                    )  # , shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=now_dir
-                    ps.append(p)
-                # 煞笔gr, popen read都非得全跑完了再一次性读取, 不用gr就正常读一句输出一句;只能额外弄出一个文本流定时读
-                done = [False]
-                threading.Thread(
-                    target=if_done_multi,  #
-                    args=(
-                        done,
-                        ps,
-                    ),
-                ).start()
-            else:
-                cmd = (
-                    config.python_cmd
-                    + ' infer/modules/train/extract/extract_f0_rmvpe_dml.py "%s/logs/%s" '
-                    % (
-                        now_dir,
-                        exp_dir,
-                    )
+            # 只保留单卡逻辑
+            cmd = (
+                config.python_cmd
+                + ' infer/modules/train/extract/extract_f0_rmvpe_dml.py "%s/logs/%s" '
+                % (
+                    now_dir,
+                    exp_dir,
                 )
-                logger.info("Execute: " + cmd)
-                p = Popen(
-                    cmd, shell=True, cwd=now_dir
-                )  # , shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=now_dir
-                p.wait()
-                done = [True]
+            )
+            logger.info("Execute: " + cmd)
+            p = Popen(
+                cmd, shell=True, cwd=now_dir
+            )
+            p.wait()
+            done = [True]
         while 1:
             with open(
                 "%s/logs/%s/extract_f0_feature.log" % (now_dir, exp_dir), "r"
@@ -359,43 +321,28 @@ def extract_f0_feature(gpus, n_p, f0method, if_f0, exp_dir, version19, gpus_rmvp
             log = f.read()
         logger.info(log)
         yield log
-    # 对不同part分别开多进程
-    """
-    n_part=int(sys.argv[1])
-    i_part=int(sys.argv[2])
-    i_gpu=sys.argv[3]
-    exp_dir=sys.argv[4]
-    os.environ["CUDA_VISIBLE_DEVICES"]=str(i_gpu)
-    """
-    leng = len(gpus)
-    ps = []
-    for idx, n_g in enumerate(gpus):
-        cmd = (
-            '"%s" infer/modules/train/extract_feature_print.py %s %s %s %s "%s/logs/%s" %s %s'
-            % (
-                config.python_cmd,
-                config.device,
-                leng,
-                idx,
-                n_g,
-                now_dir,
-                exp_dir,
-                version19,
-                config.is_half,
-            )
+    # 只保留单卡逻辑
+    cmd = (
+        '"%s" infer/modules/train/extract_feature_print.py %s 1 0 0 "%s/logs/%s" %s %s'
+        % (
+            config.python_cmd,
+            config.device,
+            now_dir,
+            exp_dir,
+            version19,
+            False,  # 禁用half
         )
-        logger.info("Execute: " + cmd)
-        p = Popen(
-            cmd, shell=True, cwd=now_dir
-        )  # , shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, cwd=now_dir
-        ps.append(p)
-    # 煞笔gr, popen read都非得全跑完了再一次性读取, 不用gr就正常读一句输出一句;只能额外弄出一个文本流定时读
+    )
+    logger.info("Execute: " + cmd)
+    p = Popen(
+        cmd, shell=True, cwd=now_dir
+    )
     done = [False]
     threading.Thread(
-        target=if_done_multi,
+        target=if_done,
         args=(
             done,
-            ps,
+            p,
         ),
     ).start()
     while 1:
@@ -956,9 +903,7 @@ with gr.Blocks(title="RVC WebUI") as app:
                         but0 = gr.Button(i18n("转换"), variant="primary")
                         with gr.Row():
                             vc_output1 = gr.Textbox(label=i18n("输出信息"))
-                            vc_output2 = gr.Audio(
-                                label=i18n("输出音频(右下角三个点,点了可以下载)")
-                            )
+                            vc_output2 = gr.Audio(label="输出音频(可试听)")
 
                         but0.click(
                             vc.vc_single,

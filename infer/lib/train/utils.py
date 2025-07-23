@@ -216,26 +216,28 @@ def latest_checkpoint_path(dir_path, regex="G_*.pth"):
 
 
 def plot_spectrogram_to_numpy(spectrogram):
-    global MATPLOTLIB_FLAG
-    if not MATPLOTLIB_FLAG:
-        import matplotlib
-        matplotlib.use("Agg")
-        MATPLOTLIB_FLAG = True
-        mpl_logger = logging.getLogger("matplotlib")
-        mpl_logger.setLevel(logging.WARNING)
-    import matplotlib.pylab as plt
+    import matplotlib.pyplot as plt
     import numpy as np
+    import logging
+    # 关闭matplotlib和PIL的DEBUG日志
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
 
-    fig, ax = plt.subplots(figsize=(10, 2))
-    im = ax.imshow(spectrogram, aspect="auto", origin="lower")
-    plt.colorbar(im, ax=ax)
-    plt.xlabel("Frames")
-    plt.ylabel("Channels")
-    plt.tight_layout()
-
+    fig, ax = plt.subplots()
+    im = ax.imshow(spectrogram, aspect='auto', origin='lower')
     fig.canvas.draw()
-    data = np.asarray(fig.canvas.buffer_rgba())
-    plt.close()
+    # 兼容新版matplotlib
+    try:
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        w, h = fig.canvas.get_width_height()
+        data = data.reshape((h, w, 3))
+    except Exception:
+        # 新版用buffer_rgba
+        data = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+        w, h = fig.canvas.get_width_height()
+        data = data.reshape((h, w, 4))  # RGBA
+        data = data[..., :3]  # 只要RGB
+    plt.close(fig)
     return data
 
 
@@ -243,6 +245,7 @@ def plot_alignment_to_numpy(alignment, info=None):
     global MATPLOTLIB_FLAG
     if not MATPLOTLIB_FLAG:
         import matplotlib
+
         matplotlib.use("Agg")
         MATPLOTLIB_FLAG = True
         mpl_logger = logging.getLogger("matplotlib")
@@ -251,8 +254,9 @@ def plot_alignment_to_numpy(alignment, info=None):
     import numpy as np
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    im = ax.imshow(alignment.transpose(), aspect="auto", origin="lower")
-    ax.set_title("Alignment")
+    im = ax.imshow(
+        alignment.transpose(), aspect="auto", origin="lower", interpolation="none"
+    )
     fig.colorbar(im, ax=ax)
     xlabel = "Decoder timestep"
     if info is not None:
@@ -262,7 +266,8 @@ def plot_alignment_to_numpy(alignment, info=None):
     plt.tight_layout()
 
     fig.canvas.draw()
-    data = np.asarray(fig.canvas.buffer_rgba())
+    data = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep="")
+    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
     plt.close()
     return data
 

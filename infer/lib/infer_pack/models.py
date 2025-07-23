@@ -6,17 +6,15 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 import torch
-import torch_musa
 from torch import nn
 from torch.nn import AvgPool1d, Conv1d, Conv2d, ConvTranspose1d
 from torch.nn import functional as F
-from torch.nn.utils import spectral_norm
+from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
 from infer.lib.infer_pack import attentions, commons, modules
 from infer.lib.infer_pack.commons import get_padding, init_weights
-from infer.lib.musa_weight_norm import weight_norm_musa as weight_norm, remove_weight_norm
 
 has_xpu = bool(hasattr(torch, "xpu") and torch.xpu.is_available())
-has_musa = bool(hasattr(torch, "musa") and torch_musa.is_available())
+
 
 class TextEncoder(nn.Module):
     def __init__(

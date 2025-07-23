@@ -499,14 +499,7 @@ class RMVPE:
         self.resample_kernel = {}
         self.is_half = is_half
         if device is None:
-            if torch.cuda.is_available():
-                device = "cuda:0"
-            elif hasattr(torch, "musa") and torch_musa.is_available():
-                device = "musa:0"
-                # 在MUSA设备上强制使用float32
-                self.is_half = False
-            else:
-                device = "cpu"
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.device = device
         self.mel_extractor = MelSpectrogram(
             is_half, 128, 16000, 1024, 160, None, 30, 8000
@@ -522,8 +515,6 @@ class RMVPE:
         else:
             if str(self.device) == "cuda":
                 self.device = torch.device("cuda:0")
-            elif str(self.device) == "musa":
-                self.device = torch.device("musa:0")
 
             def get_jit_model():
                 jit_model_path = model_path.rstrip(".pth")
@@ -554,11 +545,10 @@ class RMVPE:
                 ckpt = torch.load(model_path, map_location="cpu")
                 model.load_state_dict(ckpt)
                 model.eval()
-                # 在MUSA设备上强制使用float32
-                if "musa" in str(self.device):
-                    model = model.float()
+                if is_half:
+                    model = model.half()
                 else:
-                    model = model.half() if is_half else model.float()
+                    model = model.float()
                 return model
 
             if use_jit:
@@ -583,7 +573,6 @@ class RMVPE:
             n_pad = 32 * ((n_frames - 1) // 32 + 1) - n_frames
             if n_pad > 0:
                 mel = F.pad(mel, (0, n_pad), mode="constant")
-            
             if "privateuseone" in str(self.device):
                 onnx_input_name = self.model.get_inputs()[0].name
                 onnx_outputs_names = self.model.get_outputs()[0].name
@@ -592,18 +581,8 @@ class RMVPE:
                     input_feed={onnx_input_name: mel.cpu().numpy()},
                 )[0]
             else:
-                # 在MUSA设备上确保使用float32
-                if "musa" in str(self.device):
-                    mel = mel.float()
-                else:
-                    mel = mel.half() if self.is_half else mel.float()
-                
-                # 确保输入维度正确
-                if mel.dim() == 2:
-                    mel = mel.unsqueeze(0)
-                
+                mel = mel.half() if self.is_half else mel.float()
                 hidden = self.model(mel)
-            
             return hidden[:, :n_frames]
 
     def decode(self, hidden, thred=0.03):
@@ -614,38 +593,31 @@ class RMVPE:
         return f0
 
     def infer_from_audio(self, audio, thred=0.03):
+        # torch.cuda.synchronize()
+        # t0 = ttime()
         if not torch.is_tensor(audio):
             audio = torch.from_numpy(audio)
-        
-        # 确保输入张量在正确的设备上并使用正确的精度
-        if "musa" in str(self.device):
-            audio = audio.float().to(self.device)
-        else:
-            audio = audio.float().to(self.device).unsqueeze(0)
-            if self.is_half:
-                audio = audio.half()
-        
-        # 提取mel特征
-        mel = self.mel_extractor(audio, center=True)
-        
-        # 确保mel特征在正确的设备上
-        if "musa" in str(self.device):
-            mel = mel.float()
-        
-        # 获取隐藏状态
+        mel = self.mel_extractor(
+            audio.float().to(self.device).unsqueeze(0), center=True
+        )
+        # print(123123123,mel.device.type)
+        # torch.cuda.synchronize()
+        # t1 = ttime()
         hidden = self.mel2hidden(mel)
-        
-        # 处理输出
+        # torch.cuda.synchronize()
+        # t2 = ttime()
+        # print(234234,hidden.device.type)
         if "privateuseone" not in str(self.device):
             hidden = hidden.squeeze(0).cpu().numpy()
         else:
             hidden = hidden[0]
-            
-        # 确保使用float32进行解码
-        if self.is_half:
+        if self.is_half == True:
             hidden = hidden.astype("float32")
-        
+
         f0 = self.decode(hidden, thred=thred)
+        # torch.cuda.synchronize()
+        # t3 = ttime()
+        # print("hmvpe:%s\t%s\t%s\t%s"%(t1-t0,t2-t1,t3-t2,t3-t0))
         return f0
 
     def to_local_average_cents(self, salience, thred=0.05):

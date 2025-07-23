@@ -6,6 +6,7 @@ logger = logging.getLogger(__name__)
 
 import ffmpeg
 import torch
+import torch_musa
 
 from configs.config import Config
 from infer.modules.uvr5.mdxnet import MDXNetDereverb
@@ -16,6 +17,7 @@ config = Config()
 
 def uvr(model_name, inp_root, save_root_vocal, paths, save_root_ins, agg, format0):
     infos = []
+    pre_fun = None
     try:
         inp_root = inp_root.strip(" ").strip('"').strip("\n").strip('"').strip(" ")
         save_root_vocal = (
@@ -93,16 +95,30 @@ def uvr(model_name, inp_root, save_root_vocal, paths, save_root_ins, agg, format
         infos.append(traceback.format_exc())
         yield "\n".join(infos)
     finally:
+        # 只做清理，不 log，不 yield，不访问 try 里的变量
         try:
-            if model_name == "onnx_dereverb_By_FoxJoy":
-                del pre_fun.pred.model
-                del pre_fun.pred.model_
-            else:
-                del pre_fun.model
-                del pre_fun
-        except:
-            traceback.print_exc()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            logger.info("Executed torch.cuda.empty_cache()")
-    yield "\n".join(infos)
+        #     if model_name == "onnx_dereverb_By_FoxJoy":
+        #         del pre_fun.pred.model
+        #         del pre_fun.pred.model_
+        #     else:
+        #         del pre_fun.model
+        #         del pre_fun
+        # except:
+        #     traceback.print_exc()
+        # if torch_musa.is_available():
+        #     torch_musa.empty_cache()
+        #     logger.info("Executed torch_musa.empty_cache()")
+            if pre_fun is not None:
+                if model_name == "onnx_dereverb_By_FoxJoy":
+                    del pre_fun.pred.model
+                    del pre_fun.pred.model_
+                else:
+                    del pre_fun.model
+                    del pre_fun
+        except Exception:
+            pass
+        try:
+            if torch_musa.is_available():
+                torch_musa.empty_cache()
+        except Exception:
+            pass
